@@ -1,0 +1,13 @@
+flask
+flask-cors
+langchain
+langchain-huggingface
+langchain-chroma
+langchain-anthropic
+chromadb
+sentence-transformers
+sqlite3
+unstructured
+python-docx2txt
+pypdf
+anthropic
