@@ -1,0 +1,16 @@
+flask
+flask-cors
+chromadb
+sqlite3
+watchdog
+langchain
+langchain-huggingface
+langchain-chroma
+langchain-anthropic
+langchain_community
+sentence-transformers
+unstructured
+python-docx2txt
+pypdf
+anthropic
+

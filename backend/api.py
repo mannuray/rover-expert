@@ -9,14 +9,21 @@ from langchain.chains import RetrievalQA
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_anthropic import ChatAnthropic
+from langchain_deepseek import ChatDeepSeek
 from langchain_community.document_loaders import TextLoader, PyPDFLoader, CSVLoader, Docx2txtLoader, UnstructuredMarkdownLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.prompts import PromptTemplate
 
 
 # ✅ Environment Variables
-#MODEL = os.getenv("MODEL", "mistral")
-MODEL = os.getenv("MODEL", "claude-3-opus-20240229")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+#MODEL_PROVIDER = "deepseek" #os.getenv("MODEL_PROVIDER", "anthropic")  # Options: anthropic, deepseek
+#MODEL_NAME = "deepseek-chat" #os.getenv("MODEL_NAME", "claude-3-opus-20240229")
+
+MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "anthropic")  # Options: anthropic, deepseek
+MODEL_NAME = os.getenv("MODEL_NAME", "claude-3-opus-20240229")
+
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 EMBEDDINGS_MODEL_NAME = os.getenv("EMBEDDINGS_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
 TARGET_SOURCE_CHUNKS = int(os.getenv("TARGET_SOURCE_CHUNKS", 4))
 
@@ -73,16 +80,49 @@ vectorstore = Chroma(
     embedding_function=embeddings
 )
 
+# ✅ Model Factory
+def get_llm(provider, model_name, **kwargs):
+    """Factory function to create LLM instances based on provider"""
+    if provider.lower() == "anthropic":
+        return ChatAnthropic(
+            model=model_name,
+            anthropic_api_key=kwargs.get("api_key", ANTHROPIC_API_KEY)
+        )
+    elif provider.lower() == "deepseek":
+        return ChatDeepSeek(
+            model_name=model_name,
+            api_key=kwargs.get("api_key", DEEPSEEK_API_KEY),
+            temperature=0.7,
+            max_tokens=2048
+        )
+    else:
+        raise ValueError(f"Unsupported model provider: {provider}")
+
 retriever = vectorstore.as_retriever(search_kwargs={"k": TARGET_SOURCE_CHUNKS})
-#llm = OllamaLLM(model=MODEL)
-llm = ChatAnthropic(model=MODEL, anthropic_api_key=ANTHROPIC_API_KEY)
+print(f"🔌 Model Provider {MODEL_PROVIDER}")
+print(f"🔌 Model Name: {MODEL_NAME}")
+llm = get_llm(MODEL_PROVIDER, MODEL_NAME)
 
+# Add prompt template for pointwise answers
+POINTWISE_PROMPT = PromptTemplate(
+    input_variables=["context", "question"],
+    template="""Using the context provided below, write a clear and comprehensive answer to the question. 
+    Ensure your response is well-structured, coherent, and addresses all key aspects from the context. use markdown format.
 
+    Context: {context}
+
+    Question: {question}
+
+    Answer:"""
+)
+
+# Modify the qa_chain initialization
 qa_chain = RetrievalQA.from_chain_type(
     llm=llm,
     chain_type="stuff",
     retriever=retriever,
-    return_source_documents=True
+    return_source_documents=True,
+    chain_type_kwargs={"prompt": POINTWISE_PROMPT}
 )
 print("🚀 RAG system connected to Chroma server!")
 
@@ -116,6 +156,7 @@ def query():
     try:
         data = request.get_json()
         query = data.get("query", "")
+        debug = data.get("debug", False)
         semantic_only = data.get("semantic_only", False)
 
         if not query:
@@ -130,6 +171,8 @@ def query():
                 "sources": sources,
                 "time_taken": f"{time.time() - start:.2f} seconds"
             }
+            if debug:
+                response["raw_chunks"] = sources
         else:
             res = qa_chain(query)
             answer = res['result']
@@ -143,11 +186,26 @@ def query():
                 "sources": sources,
                 "time_taken": f"{time.time() - start:.2f} seconds"
             }
+            if debug:
+                response["raw_chunks"] = [doc.page_content for doc in docs]
         
         return jsonify(response), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/debug-retrieve', methods=['POST'])
+def debug_retrieve():
+    data = request.get_json()
+    query = data.get("query", "")
+    if not query:
+        return jsonify({"error": "Query cannot be empty"}), 400
+
+    docs = retriever.get_relevant_documents(query)
+    return jsonify([
+        {"content": doc.page_content, "metadata": doc.metadata}
+        for doc in docs
+    ])
 
 @app.route('/ask-expert', methods=['POST'])
 def ask_expert():
@@ -196,8 +254,12 @@ def upload_docs():
                 documents = loader.load()
 
                 # Split documents into smaller chunks
-                text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+                text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
                 docs = text_splitter.split_documents(documents)
+                for doc in docs:
+                    doc.metadata["filename"] = file.filename
+                    doc.metadata["uploaded_at"] = time.time()
+
 
                 all_docs.extend(docs)
             except Exception as e:
